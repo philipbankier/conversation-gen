@@ -6,3 +6,4 @@ ffmpeg-python==0.2.0
 google-generativeai==0.5.2
 huggingface_hub
 gradio==4.44.1
+# force rebuild Sun Jul  6 14:14:32 EDT 2025
