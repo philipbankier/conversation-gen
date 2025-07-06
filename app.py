@@ -117,7 +117,7 @@ def infer(text_a, text_b, image, voice_a, voice_b):
     return generate_video(image, ["spk1.wav", "spk2.wav"], prompt)
 
 # ---------------------------------------------------------------------------#
-# 7.  Gradio UI
+# 7.  Gradio UI  (v4.40+ syntax, no DeprecationWarning crash)
 # ---------------------------------------------------------------------------#
 with gr.Blocks(title="Kyutai TTS → MultiTalk (480 p)") as demo:
     gr.Markdown(
@@ -130,15 +130,23 @@ with gr.Blocks(title="Kyutai TTS → MultiTalk (480 p)") as demo:
         text_b = gr.Text(label="Speaker 2 text")
     image_in = gr.Image(label="Reference image", type="filepath")
 
-    catalog       = get_voice_catalog()
-    default_voice = catalog[0] if catalog else None
+    voices = get_voice_catalog()
+    default_voice = voices[0] if voices else None
     with gr.Row():
-        voice_a = gr.Dropdown(label="Voice 1", choices=catalog, value=default_voice)
-        voice_b = gr.Dropdown(label="Voice 2", choices=catalog, value=default_voice)
+        voice_a = gr.Dropdown(label="Voice 1", choices=voices, value=default_voice)
+        voice_b = gr.Dropdown(label="Voice 2", choices=voices, value=default_voice)
 
-    out_vid  = gr.Video(label="Generated clip")
-    gen_btn  = gr.Button("Generate")
-    gen_btn.click(infer, [text_a, text_b, image_in, voice_a, voice_b], out_vid)
+    out_vid = gr.Video(label="Generated clip")
 
+    # ---- bind button with explicit concurrency limit (new API) -------------
+    gen_btn = gr.Button("Generate")
+    gen_btn.click(
+        fn=infer,
+        inputs=[text_a, text_b, image_in, voice_a, voice_b],
+        outputs=out_vid,
+        concurrency_limit=1      # replaces old queue(concurrency_count=…)
+    )
+
+# just launch; queue() without args is implicit since Gradio 4.40
 if __name__ == "__main__":
-    demo.queue(concurrency_count=1, max_size=5).launch()
+    demo.launch(max_threads=10)   # default is fine; adjust if needed
