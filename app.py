@@ -22,12 +22,6 @@ if not MULTITALK_DIR.exists():
          "https://github.com/MeiGen-AI/MultiTalk.git",
          str(MULTITALK_DIR)]
     )
-    # optional: try flash-attn now that torch is importable (fails gracefully)
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install",
-                               "flash-attn==2.6.1", "--no-build-isolation"])
-    except subprocess.CalledProcessError:
-        print("⚠️  flash-attn build failed — falling back to default attention")
 
 sys.path.append(str(MULTITALK_DIR.resolve()))
 from multitalk_wrapper import generate_video               # noqa: E402
