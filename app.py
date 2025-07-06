@@ -51,7 +51,7 @@ def infer(text_a, text_b, image, voice_a, voice_b):
     sf.write("spk2.wav", wav_b, 24_000)
 
     # 3. Free GPU memory before MultiTalk
-    del tts
+    tts = None
     torch.cuda.empty_cache()
     gc.collect()
 
