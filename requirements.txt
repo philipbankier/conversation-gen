@@ -5,4 +5,4 @@ soundfile==0.12.1
 ffmpeg-python==0.2.0
 google-generativeai==0.5.2
 huggingface_hub
-gradio==4.45.0
+gradio==4.44.1
