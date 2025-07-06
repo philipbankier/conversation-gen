@@ -2,7 +2,7 @@
 title: Conversation-Gen(Kyutai-TTS → MultiTalk)
 emoji: 🎭
 colorFrom: indigo
-colorTo: cyan
+colorTo: blue
 sdk: gradio
 sdk_version: "4.27.0"
 app_file: app.py
