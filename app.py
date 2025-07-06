@@ -4,6 +4,24 @@ from huggingface_hub import list_repo_files
 from moshi import TTS
 from multitalk_wrapper import generate_video
 
+import sys, subprocess, pathlib
+
+# ---- bring MultiTalk onto PYTHONPATH ---------------------------------------
+MULTITALK_DIR = pathlib.Path("multitalk_src")
+if not MULTITALK_DIR.exists():
+    # shallow-clone to keep build light
+    subprocess.check_call(
+        ["git", "clone", "--depth", "1",
+         "https://github.com/MeiGen-AI/MultiTalk.git",
+         str(MULTITALK_DIR)]
+    )
+    # optional: install its own tiny requirements.txt
+    req_file = MULTITALK_DIR / "requirements.txt"
+    if req_file.exists():
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", req_file])
+
+sys.path.append(str(MULTITALK_DIR.resolve()))
+
 # ---- Constants -------------------------------------------------------------
 TTS_REPO   = "kyutai/tts-1.6b-en_fr"
 VOICE_REPO = "kyutai/tts-voices"
