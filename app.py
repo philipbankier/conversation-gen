@@ -1,20 +1,18 @@
 """
-Kyutai TTS → MultiTalk (480 p) Space
+Kyutai TTS (1.6 B) → MultiTalk (14 B, 480 p) Space
 Runs on a single L4 (24 GB) GPU.
 """
 
 # ---------------------------------------------------------------------------#
-# 0.  Standard imports
+# 0.  Standard + runtime-bootstrap imports
 # ---------------------------------------------------------------------------#
-import os, sys, gc, subprocess, pathlib, uuid, torch, soundfile as sf, gradio as gr
+import os, sys, gc, subprocess, pathlib, uuid, json, torch, soundfile as sf, gradio as gr
 import google.generativeai as genai
 from huggingface_hub import list_repo_files
-from moshi import TTS
-from multitalk_wrapper import generate_video
+from moshi.models import loaders                           # lower-level API
 
 # ---------------------------------------------------------------------------#
-# 1.  Clone MultiTalk (and optionally flash-attn) at *runtime*
-#     – avoids pip-install errors during Space build
+# 1.  Clone MultiTalk at runtime (pip-install would fail)
 # ---------------------------------------------------------------------------#
 MULTITALK_DIR = pathlib.Path("multitalk_src")
 if not MULTITALK_DIR.exists():
@@ -24,48 +22,70 @@ if not MULTITALK_DIR.exists():
          "https://github.com/MeiGen-AI/MultiTalk.git",
          str(MULTITALK_DIR)]
     )
-
-    # ❶ optional: build flash-attn now that torch is importable
+    # optional: try flash-attn now that torch is importable (fails gracefully)
     try:
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install",
-             "flash-attn==2.6.1", "--no-build-isolation"]
-        )
-        print("✅ flash-attn installed")
+        subprocess.check_call([sys.executable, "-m", "pip", "install",
+                               "flash-attn==2.6.1", "--no-build-isolation"])
     except subprocess.CalledProcessError:
         print("⚠️  flash-attn build failed — falling back to default attention")
 
-# make `import multitalk` resolve
 sys.path.append(str(MULTITALK_DIR.resolve()))
+from multitalk_wrapper import generate_video               # noqa: E402
 
 # ---------------------------------------------------------------------------#
 # 2.  Constants
 # ---------------------------------------------------------------------------#
-TTS_REPO     = "kyutai/tts-1.6b-en_fr"
-VOICE_REPO   = "kyutai/tts-voices"
-GEMINI_MODEL = "gemini-2.5-pro-preview-05-06"
-
-tts = None           # lazy-initialised Kyutai synthesiser
-voice_ids = None     # preset catalogue cache
+TTS_REPO      = "kyutai/tts-1.6b-en_fr"
+VOICE_REPO    = "kyutai/tts-voices"
+GEMINI_MODEL  = "gemini-2.5-pro-preview-05-06"
+DEVICE        = "cuda" if torch.cuda.is_available() else "cpu"
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 # ---------------------------------------------------------------------------#
-# 3.  Helper functions
+# 3.  Kyutai synthesis helper (replacement for missing moshi.TTS)
 # ---------------------------------------------------------------------------#
+def synthesize(text: str, voice_id: str):
+    """
+    Generate a 24 kHz float32 waveform for `text` in the style of `voice_id`.
+    Caches Mimi codec and TTS weights after first load.
+    """
+    if not hasattr(synthesize, "_codec"):
+        print("🔄  Loading Kyutai Mimi + TTS weights …")
+        # Mimi codec
+        mimi_ckpt = loaders.hf_hub_download(loaders.DEFAULT_REPO,
+                                            loaders.MIMI_NAME)
+        synthesize._codec = loaders.get_mimi(mimi_ckpt, device=DEVICE)
+        # TTS model
+        tts_ckpt = loaders.hf_hub_download(TTS_REPO, "pytorch_model.bin")
+        synthesize._tts = loaders.get_tts(tts_ckpt, device=DEVICE)
+
+    wav = synthesize._tts(
+        text,
+        voice=voice_id,
+        codec=synthesize._codec,
+        sample_rate=loaders.SAMPLE_RATE
+    )
+    return wav.astype("float32")          # numpy array @ 24 kHz
+
+# ---------------------------------------------------------------------------#
+# 4.  Voice preset catalogue
+# ---------------------------------------------------------------------------#
+_voice_cache = None
 def get_voice_catalog():
-    """Fetch list of voice IDs from kyutai/tts-voices repo (cached)."""
-    global voice_ids
-    if voice_ids is None:
+    global _voice_cache
+    if _voice_cache is None:
         files   = list_repo_files(VOICE_REPO)
         suffix  = ".safetensors"
-        voice_ids = sorted(
+        _voice_cache = sorted(
             f[:-len(suffix)] for f in files if f.endswith(suffix)
         )
-    return voice_ids
+    return _voice_cache
 
+# ---------------------------------------------------------------------------#
+# 5.  Gemini prompt helper
+# ---------------------------------------------------------------------------#
 def make_scene_prompt(img_name: str, line_a: str, line_b: str) -> str:
-    """Ask Gemini for a one-sentence scene description."""
     gm     = genai.GenerativeModel(GEMINI_MODEL)
     prompt = (
         "Craft one vivid, single-sentence scene description for an AI video generator.\n"
@@ -78,64 +98,47 @@ def make_scene_prompt(img_name: str, line_a: str, line_b: str) -> str:
     return rsp.text.strip()
 
 # ---------------------------------------------------------------------------#
-# 4.  Core inference pipeline
+# 6.  Core inference pipeline
 # ---------------------------------------------------------------------------#
 def infer(text_a, text_b, image, voice_a, voice_b):
-    global tts
-
-    # --- 4.1 Kyutai TTS (lazy init once) -------------------------------
-    if tts is None:
-        tts = TTS(repo=TTS_REPO, fp16=True)
-
-    wav_a = tts(text_a, voice=voice_a)
-    wav_b = tts(text_b, voice=voice_b)
+    # 6.1  Speech synthesis (GPU ~6 GB)
+    wav_a = synthesize(text_a, voice_a)
+    wav_b = synthesize(text_b, voice_b)
     sf.write("spk1.wav", wav_a, 24_000)
     sf.write("spk2.wav", wav_b, 24_000)
 
-    # --- 4.2 Free VRAM before launching MultiTalk ----------------------
-    del tts            # truly release CUDA buffers
-    torch.cuda.empty_cache()
-    gc.collect()
+    # 6.2  Free VRAM before spinning up MultiTalk
+    torch.cuda.empty_cache(); gc.collect()
 
-    # --- 4.3 Gemini scene prompt --------------------------------------
+    # 6.3  Gemini prompt
     prompt = make_scene_prompt(getattr(image, "name", "an image"), text_a, text_b)
 
-    # --- 4.4 MultiTalk video generation -------------------------------
+    # 6.4  MultiTalk → MP4
     return generate_video(image, ["spk1.wav", "spk2.wav"], prompt)
 
 # ---------------------------------------------------------------------------#
-# 5.  Gradio UI
+# 7.  Gradio UI
 # ---------------------------------------------------------------------------#
 with gr.Blocks(title="Kyutai TTS → MultiTalk (480 p)") as demo:
     gr.Markdown(
         "# Kyutai TTS → MultiTalk\n"
-        "Upload an image, type two lines of dialogue, choose voices → "
-        "get a 15-second 480 p talking-head clip."
+        "Two lines of dialogue + a reference image → talking-head clip (480 p, ≈15 s)."
     )
 
     with gr.Row():
         text_a = gr.Text(label="Speaker 1 text")
         text_b = gr.Text(label="Speaker 2 text")
-
     image_in = gr.Image(label="Reference image", type="filepath")
 
-    voices       = get_voice_catalog()
-    default_voice = voices[0] if voices else None
+    catalog       = get_voice_catalog()
+    default_voice = catalog[0] if catalog else None
     with gr.Row():
-        voice_a = gr.Dropdown(label="Voice 1", choices=voices, value=default_voice)
-        voice_b = gr.Dropdown(label="Voice 2", choices=voices, value=default_voice)
+        voice_a = gr.Dropdown(label="Voice 1", choices=catalog, value=default_voice)
+        voice_b = gr.Dropdown(label="Voice 2", choices=catalog, value=default_voice)
 
-    out_video = gr.Video(label="Generated Clip")
+    out_vid  = gr.Video(label="Generated clip")
+    gen_btn  = gr.Button("Generate")
+    gen_btn.click(infer, [text_a, text_b, image_in, voice_a, voice_b], out_vid)
 
-    generate_btn = gr.Button("Generate")
-    generate_btn.click(
-        infer,
-        inputs=[text_a, text_b, image_in, voice_a, voice_b],
-        outputs=out_video
-    )
-
-# ---------------------------------------------------------------------------#
-# 6.  Launch
-# ---------------------------------------------------------------------------#
 if __name__ == "__main__":
     demo.queue(concurrency_count=1, max_size=5).launch()
