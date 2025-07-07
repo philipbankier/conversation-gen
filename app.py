@@ -13,6 +13,7 @@ from moshi.models import loaders                           # lower-level API
 
 import importlib.metadata as md
 GRADIO_TARGET = "4.44.1"
+CLIENT_TARGET = "1.8.0"
 
 try:
     if md.version("gradio") != GRADIO_TARGET:
@@ -29,6 +30,23 @@ except md.PackageNotFoundError:
          f"gradio=={GRADIO_TARGET}"]
     )
     os.execv(sys.executable, [sys.executable] + sys.argv)
+
+try:
+    if md.version("gradio_client") < "1.4.1":
+        print(f"⚠️  gradio_client {md.version('gradio_client')} found; "
+              f"installing {CLIENT_TARGET}")
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "--no-cache-dir",
+             f"gradio_client=={CLIENT_TARGET}", "--upgrade", "--force-reinstall"]
+        )
+        os.execv(sys.executable, [sys.executable] + sys.argv)   # hard-restart
+except md.PackageNotFoundError:
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", "--no-cache-dir",
+         f"gradio_client=={CLIENT_TARGET}"]
+    )
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
 
 # ---------------------------------------------------------------------------#
 # 1.  Clone MultiTalk at runtime (pip-install would fail)
