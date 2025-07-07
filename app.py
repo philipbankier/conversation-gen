@@ -88,7 +88,9 @@ def synthesize(text: str, voice_id: str):
                                             loaders.MIMI_NAME)
         synthesize._codec = loaders.get_mimi(mimi_ckpt, device=DEVICE)
         # TTS model
-        tts_ckpt = loaders.hf_hub_download(TTS_REPO, "pytorch_model.bin")
+        tts_ckpt = loaders.hf_hub_download(
+            TTS_REPO, "dsm_tts_1e68beda@240.safetensors"
+        )
         synthesize._tts = loaders.get_tts(tts_ckpt, device=DEVICE)
 
     wav = synthesize._tts(
