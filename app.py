@@ -11,6 +11,25 @@ import google.generativeai as genai
 from huggingface_hub import list_repo_files
 from moshi.models import loaders                           # lower-level API
 
+import importlib.metadata as md
+GRADIO_TARGET = "4.44.1"
+
+try:
+    if md.version("gradio") != GRADIO_TARGET:
+        print(f"⚠️  Gradio {md.version('gradio')} found; installing {GRADIO_TARGET}")
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "--no-cache-dir",
+             f"gradio=={GRADIO_TARGET}", "--upgrade", "--force-reinstall"]
+        )
+        print("✅  Gradio upgraded, restarting …")
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+except md.PackageNotFoundError:
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", "--no-cache-dir",
+         f"gradio=={GRADIO_TARGET}"]
+    )
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
 # ---------------------------------------------------------------------------#
 # 1.  Clone MultiTalk at runtime (pip-install would fail)
 # ---------------------------------------------------------------------------#
