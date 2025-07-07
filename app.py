@@ -1,123 +1,116 @@
 """
-Kyutai TTS (1.6 B) → MultiTalk (14 B, 480 p)  –  fits on one L4.
+Kyutai TTS (1.6 B)  ➜  MultiTalk (14 B)  • 480 p • single L4 (24 GB)
 """
-# ---------------------------------------------------------------------------#
-# 0. Imports + one-time Gradio patch
-# ---------------------------------------------------------------------------#
-import os, sys, gc, subprocess, pathlib, torch, numpy as np, soundfile as sf, gradio as gr
-import genai                                              # new Google GenAI SDK
+# --------------------------------------------------------------------------- #
+# 0.  bootstrap: install gradio + client *without* pulling their deps
+# --------------------------------------------------------------------------- #
+import subprocess, sys, os, importlib.metadata as md
+def _pip_no_deps(pkg_spec: str):
+    subprocess.check_call([sys.executable, "-m", "pip", "install",
+                           "--no-cache-dir", "--no-deps", pkg_spec])
+
+try:
+    if md.version("gradio") < "4.44.0":
+        print("🔄  Installing gradio 4.49.0 (no-deps)…")
+        _pip_no_deps("gradio==4.49.0")
+except md.PackageNotFoundError:
+    _pip_no_deps("gradio==4.49.0")
+
+try:
+    if md.version("gradio_client") < "1.10.0":
+        print("🔄  Installing gradio_client 1.10.4 (no-deps)…")
+        _pip_no_deps("gradio_client==1.10.4")
+except md.PackageNotFoundError:
+    _pip_no_deps("gradio_client==1.10.4")
+
+# --------------------------------------------------------------------------- #
+# 1.  std imports (now gradio is safely importable)
+# --------------------------------------------------------------------------- #
+import gc, pathlib, uuid, json, numpy as np
+import torch, soundfile as sf, gradio as gr, genai
 from huggingface_hub import list_repo_files
 from moshi.models import loaders
 from moshi.models.tts import TTSModel
-import importlib.metadata as md
 
-GRADIO_TARGET = "4.44.1"
-if md.version("gradio") != GRADIO_TARGET:
-    subprocess.check_call([sys.executable, "-m", "pip", "install",
-                           f"gradio=={GRADIO_TARGET}", "--no-cache-dir",
-                           "--force-reinstall"])
-    os.execv(sys.executable, [sys.executable] + sys.argv)
-
-# ---------------------------------------------------------------------------#
-# 1.  Clone MultiTalk repo (binary ops unavailable on pip)
-# ---------------------------------------------------------------------------#
+# --------------------------------------------------------------------------- #
+# 2.  clone MultiTalk once
+# --------------------------------------------------------------------------- #
 MULTITALK_DIR = pathlib.Path("multitalk_src")
 if not MULTITALK_DIR.exists():
     subprocess.check_call(["git", "clone", "--depth", "1",
                            "https://github.com/MeiGen-AI/MultiTalk.git",
                            str(MULTITALK_DIR)])
-sys.path.append(str(MULTITALK_DIR.resolve()))
-from multitalk_wrapper import generate_video                              # noqa
+import sys; sys.path.append(str(MULTITALK_DIR))
+from multitalk_wrapper import generate_video             # noqa: E402
 
-# ---------------------------------------------------------------------------#
-# 2. Constants
-# ---------------------------------------------------------------------------#
+# --------------------------------------------------------------------------- #
+# 3.  constants
+# --------------------------------------------------------------------------- #
 TTS_REPO   = "kyutai/tts-1.6b-en_fr"
 VOICE_REPO = "kyutai/tts-voices"
-GEMINI_MODEL = "gemini-2.5-pro-preview-05-06"
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+GEM_MODEL  = "gemini-2.5-pro-preview-05-06"
+DEVICE     = "cuda" if torch.cuda.is_available() else "cpu"
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
 
-# ---------------------------------------------------------------------------#
-# 3. Speech synthesis
-# ---------------------------------------------------------------------------#
+# --------------------------------------------------------------------------- #
+# 4.  Kyutai single-load synthesiser
+# --------------------------------------------------------------------------- #
 def synthesize(text: str, voice_id: str) -> np.ndarray:
-    if not hasattr(synthesize, "_codec"):
-        print("🔄  Loading Kyutai Mimi + TTS …")
-        mimi_ckpt           = loaders.hf_hub_download(loaders.DEFAULT_REPO,
-                                                     loaders.MIMI_NAME)
-        synthesize._codec   = loaders.get_mimi(mimi_ckpt, device=DEVICE)
-        ckpt_info           = loaders.CheckpointInfo.from_hf_repo(TTS_REPO)
-        synthesize._tts     = TTSModel.from_checkpoint_info(
-                                  ckpt_info, n_q=32, temp=0.6,
-                                  device=torch.device(DEVICE))
+    if not hasattr(synthesize, "_state"):
+        print("🔄 Loading Mimi + TTS weights…")
+        mimi_w   = loaders.hf_hub_download(loaders.DEFAULT_REPO, loaders.MIMI_NAME)
+        mimi     = loaders.get_mimi(mimi_w, device=DEVICE)
 
-    # --- Kyutai generation pipeline ---
-    entries    = synthesize._tts.prepare_script([text])
-    voice_path = synthesize._tts.get_voice_path(voice_id)
-    cond_attrs = synthesize._tts.make_condition_attributes([voice_path], cfg_coef=2.0)
+        ckpt     = loaders.CheckpointInfo.from_hf_repo(TTS_REPO)
+        tts      = TTSModel.from_checkpoint_info(ckpt, n_q=32, temp=0.6,
+                                                 device=torch.device(DEVICE))
+        synthesize._state = (mimi, tts)
 
-    with synthesize._tts.mimi.streaming(1), torch.no_grad():
-        out = synthesize._tts.generate([entries], [cond_attrs])
+    mimi, tts = synthesize._state
+    wav = tts(text, voice=voice_id, codec=mimi, sample_rate=loaders.SAMPLE_RATE)
+    return wav.astype("float32")
 
-    frames = [
-        synthesize._tts.mimi.decode(f[:, 1:, :]).cpu().numpy()[0, 0]
-        for f in out.frames[synthesize._tts.delay_steps :]
-    ]
-    return np.concatenate(frames).astype("float32")  # 24 kHz PCM
+# --------------------------------------------------------------------------- #
+# 5.  helpers
+# --------------------------------------------------------------------------- #
+def voice_catalog():
+    if not hasattr(voice_catalog, "_cache"):
+        files = list_repo_files(VOICE_REPO)
+        voice_catalog._cache = sorted(f[:-11] for f in files if f.endswith(".safetensors"))
+    return voice_catalog._cache
 
-# ---------------------------------------------------------------------------#
-# 4. Helpers
-# ---------------------------------------------------------------------------#
-_voice_cache = None
-def get_voice_catalog():
-    global _voice_cache
-    if _voice_cache is None:
-        suffix = ".safetensors"
-        _voice_cache = sorted(
-            f[:-len(suffix)] for f in list_repo_files(VOICE_REPO) if f.endswith(suffix)
-        )
-    return _voice_cache
+def gemini_prompt(img_name: str, l1: str, l2: str) -> str:
+    model  = genai.GenerativeModel(GEM_MODEL)
+    prompt = (f"Craft one vivid single-sentence scene description for an AI video "
+              f"generator. The still image depicts: {img_name}. Dialogue:\n"
+              f"Speaker 1: {l1}\nSpeaker 2: {l2}")
+    return model.generate_content(prompt, stream=False).text.strip()
 
-def make_scene_prompt(img_name, a, b):
-    gm = genai.GenerativeModel(GEMINI_MODEL)
-    prompt = (f"Craft one vivid, single-sentence scene description for an AI video generator.\n"
-              f"The still image depicts: {img_name}.\n"
-              f"The dialogue is:\nSpeaker 1: {a}\nSpeaker 2: {b}")
-    return gm.generate_content(prompt, timeout=20).text.strip()
-
-# ---------------------------------------------------------------------------#
-# 5. Pipeline
-# ---------------------------------------------------------------------------#
-def infer(text_a, text_b, image, voice_a, voice_b):
-    wav_a = synthesize(text_a, voice_a)
-    wav_b = synthesize(text_b, voice_b)
-    sf.write("spk1.wav", wav_a, 24_000)
-    sf.write("spk2.wav", wav_b, 24_000)
+# --------------------------------------------------------------------------- #
+# 6.  pipeline
+# --------------------------------------------------------------------------- #
+def pipeline(text_a, text_b, image_path, voice_a, voice_b):
+    wav_a = synthesize(text_a, voice_a); sf.write("spk1.wav", wav_a, 24_000)
+    wav_b = synthesize(text_b, voice_b); sf.write("spk2.wav", wav_b, 24_000)
 
     torch.cuda.empty_cache(); gc.collect()
 
-    prompt = make_scene_prompt(getattr(image, "name", "an image"), text_a, text_b)
-    return generate_video(image, ["spk1.wav", "spk2.wav"], prompt)
+    prompt = gemini_prompt(os.path.basename(image_path), text_a, text_b)
+    return generate_video(image_path, ["spk1.wav", "spk2.wav"], prompt)
 
-# ---------------------------------------------------------------------------#
-# 6. UI
-# ---------------------------------------------------------------------------#
-with gr.Blocks(title="Kyutai TTS → MultiTalk (480 p)") as demo:
-    gr.Markdown("# Kyutai TTS → MultiTalk\nTwo lines + one image → talking-head clip (480 p).")
-    with gr.Row():
-        text_a = gr.Text(label="Speaker 1 text")
-        text_b = gr.Text(label="Speaker 2 text")
-    image_in = gr.Image(label="Reference image", type="filepath")
-    voices   = get_voice_catalog()
-    with gr.Row():
-        voice_a = gr.Dropdown(label="Voice 1", choices=voices, value=voices[0])
-        voice_b = gr.Dropdown(label="Voice 2", choices=voices, value=voices[0])
-    out_vid = gr.Video(label="Generated clip")
-    gr.Button("Generate").click(infer,
-                                inputs=[text_a, text_b, image_in, voice_a, voice_b],
-                                outputs=out_vid,
-                                concurrency_limit=1)
+# --------------------------------------------------------------------------- #
+# 7.  UI
+# --------------------------------------------------------------------------- #
+with gr.Blocks(title="Kyutai TTS ➜ MultiTalk (480 p)") as demo:
+    gr.Markdown("## One image + two lines → talking-head video")
+    t1, t2      = gr.Text(label="Speaker 1"), gr.Text(label="Speaker 2")
+    img         = gr.Image(label="Reference image", type="filepath")
+    vlist       = voice_catalog()
+    va, vb      = gr.Dropdown(vlist, value=vlist[0], label="Voice 1"), \
+                  gr.Dropdown(vlist, value=vlist[1], label="Voice 2")
+    out         = gr.Video(label="Generated MP4")
+    btn         = gr.Button("Generate")
+    btn.click(pipeline, [t1, t2, img, va, vb], out, concurrency_limit=1)
 
 if __name__ == "__main__":
-    demo.launch(max_threads=10)
+    demo.launch(share=False, max_threads=10)
