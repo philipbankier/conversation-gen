@@ -1,12 +1,12 @@
-# CUDA 12 stack (uses the L4’s driver)
-torch==2.4.1       --extra-index-url https://download.pytorch.org/whl/cu121
-xformers==0.0.28   --extra-index-url https://download.pytorch.org/whl/cu121
-
-flash-attn==2.6.1          # MultiTalk likes it; silently skipped if nvcc absent
-moshi==0.2.7               # Kyutai TTS deps
+torch==2.4.1           --extra-index-url https://download.pytorch.org/whl/cu121
+xformers==0.0.28       --extra-index-url https://download.pytorch.org/whl/cu121
+moshi==0.2.7
 soundfile==0.12.1
 ffmpeg-python==0.2.0
-google-genai==1.24.0       # **new SDK**
+google-genai==1.24.0
 huggingface_hub>=0.23.3
-websockets>=14.0,<15.1     # satisfies google-genai
-fsspec<=2025.3.0           # keeps `datasets` happy
+websockets>=14.0,<15.1
+fsspec<=2025.3.0
+numpy>=1.24
+gradio==4.49.0           # pulled in at runtime with --no-deps anyway
+gradio-client==1.10.4    # idem
